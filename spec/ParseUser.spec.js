@@ -1762,6 +1762,24 @@ describe('Parse.User testing', () => {
       done();
     });
   });
+  
+  it('should properly set ACL', (done) => {
+    // The android SDK can send an empty authData object along with username and password.
+    Parse.User.signUp('artof', 'thedeal', { authData: {} }).then((user) => {
+      var acl = new Parse.ACL();
+      acl.setReadAccess(user.id, true);
+      acl.setWriteAccess(user.id, true);
+      acl.setPublicReadAccess(false);
+      user.setACL(acl);
+      return user.save();
+    }).then((user) => {
+      var acl = user.getACL();
+      expect(acl.getPublicReadAccess()).toBe(false);
+      expect(acl.getReadAccess(user.id)).toBe(true);
+      expect(acl.getWriteAccess(user.id)).toBe(true);
+      done();
+    });
+  });
 
 });
 
