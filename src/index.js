@@ -184,7 +184,7 @@ class ParseServer {
   }
   
   get app() {
-    return ParseServer.expressApp(this.maxUploadSize);
+    return ParseServer.expressApp({maxUploadSize: this.maxUploadSize});
   }
   
   set mount(value) {
@@ -304,6 +304,11 @@ class ParseServer {
   get verifyEmailURL() {
     return `${this.publicServerURL}/apps/${this.applicationId}/verify_email`;
   }
+  
+  static ParseServer(options) {
+    let parseServer = new ParseServer(options);
+    return parseServer.app;
+  }
 }
 
 function addParseCloud() {
@@ -312,7 +317,5 @@ function addParseCloud() {
   global.Parse = Parse;
 }
 
-module.exports = {
-  ParseServer: ParseServer,
-  S3Adapter: S3Adapter,
-};
+module.exports = ParseServer;
+module.exports.S3Adapter = S3Adapter;
