@@ -12,7 +12,6 @@ var batch = require('./batch'),
 
 //import passwordReset           from './passwordReset';
 import cache                   from './cache';
-import Config                  from './Config';
 import parseServerPackage      from '../package.json';
 import ParsePushAdapter        from './Adapters/Push/ParsePushAdapter';
 import PromiseRouter           from './PromiseRouter';
@@ -74,176 +73,219 @@ addParseCloud();
 // "javascriptKey": optional key from Parse dashboard
 // "push": optional key from configure push
 
-function ParseServer({
-  appId = requiredParameter('You must provide an appId!'),
-  masterKey = requiredParameter('You must provide a masterKey!'),
-  appName,
-  databaseAdapter,
-  filesAdapter,
-  push,
-  loggerAdapter,
-  databaseURI = DatabaseAdapter.defaultDatabaseURI,
-  cloud,
-  collectionPrefix = '',
-  clientKey,
-  javascriptKey,
-  dotNetKey,
-  restAPIKey,
-  fileKey = 'invalid-file-key',
-  facebookAppIds = [],
-  enableAnonymousUsers = true,
-  allowClientClassCreation = true,
-  oauth = {},
-  serverURL = requiredParameter('You must provide a serverURL!'),
-  maxUploadSize = '20mb',
-  verifyUserEmails = false,
-  emailAdapter,
-  publicServerURL,
-  customPages = {
-    invalidLink: undefined,
-    verifyEmailSuccess: undefined,
-    choosePassword: undefined,
-    passwordResetSuccess: undefined
-  },
-}) {
-  setFeature('serverVersion', parseServerPackage.version);
-  // Initialize the node client SDK automatically
-  Parse.initialize(appId, javascriptKey || 'unused', masterKey);
-  Parse.serverURL = serverURL;
+class ParseServer {
+  
+  constructor({
+    appId = requiredParameter('You must provide an appId!'),
+    masterKey = requiredParameter('You must provide a masterKey!'),
+    appName,
+    databaseAdapter,
+    filesAdapter,
+    push,
+    loggerAdapter,
+    databaseURI = DatabaseAdapter.defaultDatabaseURI,
+    cloud,
+    collectionPrefix = '',
+    clientKey,
+    javascriptKey,
+    dotNetKey,
+    restAPIKey,
+    fileKey = 'invalid-file-key',
+    facebookAppIds = [],
+    enableAnonymousUsers = true,
+    allowClientClassCreation = true,
+    oauth = {},
+    serverURL = requiredParameter('You must provide a serverURL!'),
+    maxUploadSize = '20mb',
+    verifyUserEmails = false,
+    emailAdapter,
+    publicServerURL,
+    customPages = {
+      invalidLink: undefined,
+      verifyEmailSuccess: undefined,
+      choosePassword: undefined,
+      passwordResetSuccess: undefined
+    },
+  }) {
 
-  if (databaseAdapter) {
-    DatabaseAdapter.setAdapter(databaseAdapter);
+    setFeature('serverVersion', parseServerPackage.version);
+    // Initialize the node client SDK automatically
+    Parse.initialize(appId, javascriptKey || 'unused', masterKey);
+    Parse.serverURL = serverURL;
+
+    if (databaseAdapter) {
+      DatabaseAdapter.setAdapter(databaseAdapter);
+    }
+
+    if (databaseURI) {
+      DatabaseAdapter.setAppDatabaseURI(appId, databaseURI);
+    }
+
+    if (cloud) {
+      addParseCloud();
+      if (typeof cloud === 'function') {
+        cloud(Parse)
+      } else if (typeof cloud === 'string') {
+        require(cloud);
+      } else {
+        throw "argument 'cloud' must either be a string or a function";
+      }
+    }
+
+    let filesControllerAdapter = loadAdapter(filesAdapter, () => {
+      return new GridStoreAdapter(databaseURI);
+    });
+    let pushControllerAdapter = loadAdapter(push, ParsePushAdapter);
+    let loggerControllerAdapter = loadAdapter(loggerAdapter, FileLoggerAdapter);
+    let emailControllerAdapter = loadAdapter(emailAdapter);
+    // We pass the options and the base class for the adatper,
+    // Note that passing an instance would work too
+    this.filesController = new FilesController(filesControllerAdapter, appId);
+    this.pushController = new PushController(pushControllerAdapter, appId);
+    this.loggerController = new LoggerController(loggerControllerAdapter, appId);
+    this.hooksController = new HooksController(appId, collectionPrefix);
+    this.userController = new UserController(emailControllerAdapter, appId, { verifyUserEmails });
+
+    this.masterKey = masterKey;
+    this.serverURL = serverURL;
+    this.collectionPrefix = collectionPrefix;
+    this.clientKey = clientKey;
+    this.applicationId = appId;
+    this.appId = appId;
+    this.restAPIKey = restAPIKey;
+    this.javascriptKey = javascriptKey;
+    this.dotNetKey = dotNetKey;
+    this.restAPIKey = restAPIKey;
+    this.fileKey = fileKey;
+    this.facebookAppIds = facebookAppIds;
+    this.verifyUserEmails = verifyUserEmails;
+    this.enableAnonymousUsers = enableAnonymousUsers;
+    this.allowClientClassCreation = allowClientClassCreation;
+    this.oauth = oauth;
+    this.appName = appName;
+    this.publicServerURL = publicServerURL;
+    this.customPages = customPages;
+    this.maxUploadSize = maxUploadSize;
+    this.database = DatabaseAdapter.getDatabaseConnection(appId, collectionPrefix);
+    cache.apps.set(appId, this);
+
+    // To maintain compatibility. TODO: Remove in some version that breaks backwards compatability
+    if (process.env.FACEBOOK_APP_ID) {
+      cache.apps.get(appId)['facebookAppIds'].push(process.env.FACEBOOK_APP_ID);
+    }
+
+    ParseServer.validate(cache.apps.get(appId));
+
+    // This app serves the Parse API directly.
+    // It's the equivalent of https://api.parse.com/1 in the hosted Parse API.
+    var api = express();
+    //api.use("/apps", express.static(__dirname + "/public"));
+    // File handling needs to be before default middlewares are applied
+    api.use('/', new FilesRouter().getExpressRouter({
+      maxUploadSize: maxUploadSize
+    }));
+
+    api.use('/', bodyParser.urlencoded({extended: false}), new PublicAPIRouter().expressApp());
+
+    // TODO: separate this from the regular ParseServer object
+    if (process.env.TESTING == 1) {
+      api.use('/', require('./testing-routes').router);
+    }
+
+    api.use(bodyParser.json({ 'type': '*/*' , limit: maxUploadSize }));
+    api.use(middlewares.allowCrossDomain);
+    api.use(middlewares.allowMethodOverride);
+    api.use(middlewares.handleParseHeaders);
+
+    let routers = [
+      new ClassesRouter(),
+      new UsersRouter(),
+      new SessionsRouter(),
+      new RolesRouter(),
+      new AnalyticsRouter(),
+      new InstallationsRouter(),
+      new FunctionsRouter(),
+      new SchemasRouter(),
+      new PushRouter(),
+      new LogsRouter(),
+      new IAPValidationRouter(),
+      new FeaturesRouter(),
+    ];
+
+    if (process.env.PARSE_EXPERIMENTAL_CONFIG_ENABLED || process.env.TESTING) {
+      routers.push(new GlobalConfigRouter());
+    }
+
+    if (process.env.PARSE_EXPERIMENTAL_HOOKS_ENABLED || process.env.TESTING) {
+      routers.push(new HooksRouter());
+    }
+
+    let routes = routers.reduce((memo, router) => {
+      return memo.concat(router.routes);
+    }, []);
+
+    let appRouter = new PromiseRouter(routes);
+
+    batch.mountOnto(appRouter);
+
+    api.use(appRouter.expressApp());
+
+    api.use(middlewares.handleParseErrors);
+
+    process.on('uncaughtException', (err) => {
+      if( err.code === "EADDRINUSE" ) { // user-friendly message for this common error
+        console.log(`Unable to listen on port ${err.port}. The port is already in use.`);
+        process.exit(0);
+      }
+      else {
+        throw err;
+      }
+    });
+    this.hooksController.load();
+
+    return api;
   }
-
-  if (databaseURI) {
-    DatabaseAdapter.setAppDatabaseURI(appId, databaseURI);
+  
+  static validate(options) {
+    this.validateEmailConfiguration({verifyUserEmails: options.verifyUserEmails, 
+                                appName: options.appName, 
+                                publicServerURL: options.publicServerURL})
   }
-
-  if (cloud) {
-    addParseCloud();
-    if (typeof cloud === 'function') {
-      cloud(Parse)
-    } else if (typeof cloud === 'string') {
-      require(cloud);
-    } else {
-      throw "argument 'cloud' must either be a string or a function";
+  
+  static validateEmailConfiguration({verifyUserEmails, appName, publicServerURL}) {
+    if (verifyUserEmails) {
+      if (typeof appName !== 'string') {
+        throw 'An app name is required when using email verification.';
+      }
+      if (typeof publicServerURL !== 'string') {
+        throw 'A public server url is required when using email verification.';
+      }
     }
   }
 
-  const filesControllerAdapter = loadAdapter(filesAdapter, () => {
-    return new GridStoreAdapter(databaseURI);
-  });
-  const pushControllerAdapter = loadAdapter(push, ParsePushAdapter);
-  const loggerControllerAdapter = loadAdapter(loggerAdapter, FileLoggerAdapter);
-  const emailControllerAdapter = loadAdapter(emailAdapter);
-  // We pass the options and the base class for the adatper,
-  // Note that passing an instance would work too
-  const filesController = new FilesController(filesControllerAdapter, appId);
-  const pushController = new PushController(pushControllerAdapter, appId);
-  const loggerController = new LoggerController(loggerControllerAdapter, appId);
-  const hooksController = new HooksController(appId, collectionPrefix);
-  const userController = new UserController(emailControllerAdapter, appId, { verifyUserEmails });
-
-
-  cache.apps.set(appId, {
-    masterKey: masterKey,
-    serverURL: serverURL,
-    collectionPrefix: collectionPrefix,
-    clientKey: clientKey,
-    javascriptKey: javascriptKey,
-    dotNetKey: dotNetKey,
-    restAPIKey: restAPIKey,
-    fileKey: fileKey,
-    facebookAppIds: facebookAppIds,
-    filesController: filesController,
-    pushController: pushController,
-    loggerController: loggerController,
-    hooksController: hooksController,
-    userController: userController,
-    verifyUserEmails: verifyUserEmails,
-    enableAnonymousUsers: enableAnonymousUsers,
-    allowClientClassCreation: allowClientClassCreation,
-    oauth: oauth,
-    appName: appName,
-    publicServerURL: publicServerURL,
-    customPages: customPages,
-  });
-
-  // To maintain compatibility. TODO: Remove in some version that breaks backwards compatability
-  if (process.env.FACEBOOK_APP_ID) {
-    cache.apps.get(appId)['facebookAppIds'].push(process.env.FACEBOOK_APP_ID);
+  get invalidLinkURL() {
+    return this.customPages.invalidLink || `${this.publicServerURL}/apps/invalid_link.html`;
   }
-
-  Config.validate(cache.apps.get(appId));
-
-  // This app serves the Parse API directly.
-  // It's the equivalent of https://api.parse.com/1 in the hosted Parse API.
-  var api = express();
-  //api.use("/apps", express.static(__dirname + "/public"));
-  // File handling needs to be before default middlewares are applied
-  api.use('/', new FilesRouter().getExpressRouter({
-    maxUploadSize: maxUploadSize
-  }));
-
-  api.use('/', bodyParser.urlencoded({extended: false}), new PublicAPIRouter().expressApp());
-
-  // TODO: separate this from the regular ParseServer object
-  if (process.env.TESTING == 1) {
-    api.use('/', require('./testing-routes').router);
+  
+  get verifyEmailSuccessURL() {
+    return this.customPages.verifyEmailSuccess || `${this.publicServerURL}/apps/verify_email_success.html`;
   }
-
-  api.use(bodyParser.json({ 'type': '*/*' , limit: maxUploadSize }));
-  api.use(middlewares.allowCrossDomain);
-  api.use(middlewares.allowMethodOverride);
-  api.use(middlewares.handleParseHeaders);
-
-  let routers = [
-    new ClassesRouter(),
-    new UsersRouter(),
-    new SessionsRouter(),
-    new RolesRouter(),
-    new AnalyticsRouter(),
-    new InstallationsRouter(),
-    new FunctionsRouter(),
-    new SchemasRouter(),
-    new PushRouter(),
-    new LogsRouter(),
-    new IAPValidationRouter(),
-    new FeaturesRouter(),
-  ];
-
-  if (process.env.PARSE_EXPERIMENTAL_CONFIG_ENABLED || process.env.TESTING) {
-    routers.push(new GlobalConfigRouter());
+  
+  get choosePasswordURL() {
+    return this.customPages.choosePassword || `${this.publicServerURL}/apps/choose_password`;
   }
-
-  if (process.env.PARSE_EXPERIMENTAL_HOOKS_ENABLED || process.env.TESTING) {
-    routers.push(new HooksRouter());
+  
+  get requestResetPasswordURL() {
+    return `${this.publicServerURL}/apps/${this.applicationId}/request_password_reset`;
   }
-
-  let routes = routers.reduce((memo, router) => {
-    return memo.concat(router.routes);
-  }, []);
-
-  let appRouter = new PromiseRouter(routes);
-
-  batch.mountOnto(appRouter);
-
-  api.use(appRouter.expressApp());
-
-  api.use(middlewares.handleParseErrors);
-
-  process.on('uncaughtException', (err) => {
-    if( err.code === "EADDRINUSE" ) { // user-friendly message for this common error
-      console.log(`Unable to listen on port ${err.port}. The port is already in use.`);
-      process.exit(0);
-    }
-    else {
-      throw err;
-    }
-  });
-  hooksController.load();
-
-  return api;
+  
+  get passwordResetSuccessURL() {
+    return this.customPages.passwordResetSuccess || `${this.publicServerURL}/apps/password_reset_success.html`;
+  }
+  
+  get verifyEmailURL() {
+    return `${this.publicServerURL}/apps/${this.applicationId}/verify_email`;
+  }
 }
 
 function addParseCloud() {
